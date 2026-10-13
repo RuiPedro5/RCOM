@@ -27,9 +27,11 @@ int maquinadeestados(){
     //paro de tentar ler apenas quando o alarm acabar e for reposto.
     while (STOP==FALSE && alarmEnabled==TRUE){
         unsigned char byte;
-        int bytes = readByteSerialPort(&byte);
-       if (bytes==0){continue;}
-        nBytesBuf += bytes;
+        int nbytes = readByteSerialPort(&byte);
+
+        printf ("saiu da funçao readByteSerialPort tendo ido %d bytes\n", nbytes);
+        if (nbytes<0){continue;}
+        nBytesBuf += nbytes;
 
         printf("Byte received: 0x%02X\n", byte) ; 
 
@@ -110,11 +112,13 @@ while (alarmCount<4 )
   int bytes=0;
   if (alarmEnabled == FALSE)
         {
-            alarm(3); // Set alarm to be triggered in 3s
-            alarmEnabled = TRUE;
-            //escrevo uma vez por alarme
             bytes = writeBytesSerialPort(buf, BUF_SIZE);
             printf("%d bytes written to serial port\n", bytes);
+            //escreve uma vez a cada alarme
+
+            alarm(3); // Set alarm to be triggered in 3s
+            alarmEnabled = TRUE;
+            
         }  
     
     if (maquinadeestados()==0){
