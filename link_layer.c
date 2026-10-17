@@ -20,38 +20,62 @@ int alarmCount= 0;
 static int module_counter=0;
 
 //maquinadeestados
-int maquinadeestados(){
+// Receiver state machine for supervision frames: F A C BCC1 F
+// It reads the serial port byte by byte and only finishes when a frame
+// with the expected A and C fields arrives (BCC1 = A^C is checked here too).
+// useAlarm == TRUE : stops waiting when the alarm fires (Tx waiting for UA)
+// useAlarm == FALSE: waits forever (Rx waiting for SET)
+// Returns 0 if the frame was received, 1 if the alarm fired first.
+typedef enum { ST_START, ST_FLAG_RCV, ST_A_RCV, ST_C_RCV, ST_BCC_OK, ST_STOP } State;
 
-	volatile int STOP = FALSE;
-	int nBytesBuf = 0;
-    //paro de tentar ler apenas quando o alarm acabar e for reposto.
-    while (STOP==FALSE && alarmEnabled==TRUE){
+int maquinadeestados(unsigned char expectedA, unsigned char expectedC, int useAlarm){
+
+    State state = ST_START;
+    unsigned char a = 0, c = 0;
+
+    while (state != ST_STOP){
+        //paro de tentar ler apenas quando o alarm acabar e for reposto.
+        if (useAlarm && alarmEnabled == FALSE) return 1;
+
         unsigned char byte;
         int nbytes = readByteSerialPort(&byte);
 
         printf ("saiu da funçao readByteSerialPort tendo ido %d bytes\n", nbytes);
-        if (nbytes<0){continue;}
-        nBytesBuf += nbytes;
+        //-1 (read interrupted by the alarm) or 0 (nothing read): try again,
+        //the check above decides if we must stop
+        if (nbytes<=0){continue;}
 
-        printf("Byte received: 0x%02X\n", byte) ; 
+        printf("Byte received: 0x%02X\n", byte) ;
 
-        if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf == 2){ if(byte == 0X01){continue;}else{STOP=TRUE;}}
-        
-        if(nBytesBuf == 3){ if(byte == 0X07){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf == 4){ if(byte == (0x01 ^0X07)){continue;}else{STOP=TRUE;}}
-        if(nBytesBuf==5)
-        {
-        if(byte == 0X7E){
-        printf("Received 5 bytes. Stop reading from serial port.\n");
-        return 0;
-
-        } 
-        STOP=TRUE;
+        switch (state){
+        case ST_START:
+            if (byte == 0x7E) state = ST_FLAG_RCV;
+            break;
+        case ST_FLAG_RCV:
+            if (byte == expectedA){ a = byte; state = ST_A_RCV; }
+            else if (byte != 0x7E) state = ST_START; //another FLAG: stay here
+            break;
+        case ST_A_RCV:
+            if (byte == expectedC){ c = byte; state = ST_C_RCV; }
+            else if (byte == 0x7E) state = ST_FLAG_RCV;
+            else state = ST_START;
+            break;
+        case ST_C_RCV:
+            if (byte == (a ^ c)) state = ST_BCC_OK;
+            else if (byte == 0x7E) state = ST_FLAG_RCV;
+            else state = ST_START;
+            break;
+        case ST_BCC_OK:
+            if (byte == 0x7E) state = ST_STOP;
+            else state = ST_START;
+            break;
+        default:
+            state = ST_START;
+            break;
         }
-
-	}
-	return 1;
+    }
+    printf("Frame received. Stop reading from serial port.\n");
+    return 0;
 }
 
 //alarmhandler
@@ -106,8 +130,10 @@ if (sigaction(SIGALRM, &act, NULL) == -1){
 
 printf("Alarm configured\n");
 
+alarmCount = 0;
+alarmEnabled = FALSE;
 
-while (alarmCount<4 )
+while (alarmCount <= llParameters.nRetransmissions)
 { 
   int bytes=0;
   if (alarmEnabled == FALSE)
@@ -116,13 +142,14 @@ while (alarmCount<4 )
             printf("%d bytes written to serial port\n", bytes);
             //escreve uma vez a cada alarme
 
-            alarm(3); // Set alarm to be triggered in 3s
+            alarm(llParameters.timeout); // Set alarm to be triggered in timeout seconds
             alarmEnabled = TRUE;
             
         }  
     
-    if (maquinadeestados()==0){
+    if (maquinadeestados(0x03, 0x07, TRUE)==0){
         alarm(0);
+        alarmEnabled = FALSE; // otherwise the next use of the alarm would never write
         return 0; 
     }
     
@@ -161,56 +188,22 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Read from serial port until the 'z' char is received.
+    // Wait (no alarm, no limit) for a valid SET frame: A=0x03, C=0x03
+    maquinadeestados(0x03, 0x03, FALSE);
 
-    // NOTE: This while() cycle is a simple example showing how to read from the serial port.
-    // It must be changed in order to respect the specifications of the protocol indicated in the Lab guide.
+    printf("Received SET. Will send UA.\n");
 
-    // TODO: Save the received bytes in a buffer array and print it at the end of the program.
-    volatile int STOP = FALSE;
-    int nBytesBuf = 0;
-
-    while (STOP == FALSE)
-{
-// Read one byte from serial port.
-// NOTE: You must check how many bytes were actually read by reading the return value.
-// In this example, we assume that the byte is always read, which may not be true.
-unsigned char byte;
-int bytes = readByteSerialPort(&byte);
-if (bytes==0)continue;
-nBytesBuf += bytes;
-
-printf("Byte received: 0x%02X\n", byte) ; 
-
-if(nBytesBuf == 1){ if(byte == 0X7E){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 2){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 3){ if(byte == 0X03){continue;}else{STOP=TRUE;}}
-if(nBytesBuf == 4){ if(byte == 0X00){continue;}else{STOP=TRUE;}}
-if(nBytesBuf==5)
-{
-if(byte == 0X7E){
-    //received SET frame, Has to send UA
-    printf("Received 5 bytes. Will send UA. Stop reading from serial port.\n");
-
-    // Create string to send
+    // UA is a reply sent by the Receiver, so A = 0x03 (it was 0x01)
     unsigned char buf[BUF_SIZE] = {0};
 
     buf[0] = 0X7E;
-    buf[1] = 0X01;
+    buf[1] = 0X03;
     buf[2] = 0X07;
     buf[3]= buf[1]^buf[2];
     buf[4]= 0X7E;
 
-    bytes = writeBytesSerialPort(buf, BUF_SIZE);
+    int bytes = writeBytesSerialPort(buf, BUF_SIZE);
     printf("%d bytes written to serial port\n", bytes);
-    STOP = TRUE;
-}
-}
-
-}
-
-
-    printf("Total bytes received: %d\n", nBytesBuf);
 
     // Close serial port
     if (closeSerialPort() < 0)
