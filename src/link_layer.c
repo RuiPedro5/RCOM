@@ -29,6 +29,25 @@ static LinkLayer ll;
 //C field of the last supervision frame accepted by maquinadeestados
 static unsigned char lastC = 0;
 
+//protocol statistics (printed when the link is closed)
+static int statISent = 0;    //I frames sent (first transmission)
+static int statRetrans = 0;  //I frames retransmitted
+static int statTimeouts = 0; //time-outs (SET, I and DISC frames)
+static int statREJRcv = 0;   //REJ received (Tx)
+static int statIRcv = 0;     //I frames accepted (Rx)
+static int statDup = 0;      //duplicate I frames received (Rx)
+static int statREJSent = 0;  //REJ sent (Rx)
+
+static void printStatistics(int isTx){
+    printf("---- Link layer statistics ----\n");
+    if (isTx)
+        printf("I frames sent: %d | retransmitted: %d | time-outs: %d | REJ received: %d\n",
+               statISent, statRetrans, statTimeouts, statREJRcv);
+    else
+        printf("I frames accepted: %d | duplicates: %d | REJ sent: %d | time-outs: %d\n",
+               statIRcv, statDup, statREJSent, statTimeouts);
+}
+
 //expectedC value meaning "accept any of RR0, RR1, REJ0, REJ1"
 #define C_ANY_REPLY 0xFF
 //C field of RR / REJ for a given N(r)
@@ -62,12 +81,16 @@ int maquinadeestados(unsigned char expectedA, unsigned char expectedC, int useAl
         unsigned char byte;
         int nbytes = readByteSerialPort(&byte);
 
+#ifdef DEBUG_BYTES
         printf ("saiu da funçao readByteSerialPort tendo ido %d bytes\n", nbytes);
+#endif
         //-1 (read interrupted by the alarm) or 0 (nothing read): try again,
         //the check above decides if we must stop
         if (nbytes<=0){continue;}
 
+#ifdef DEBUG_BYTES
         printf("Byte received: 0x%02X\n", byte) ;
+#endif
 
         switch (state){
         case ST_START:
@@ -212,6 +235,14 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
+    // The Rx also uses the alarm: in llCloseRx the DISC it sends is protected by a timer
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+    if (sigaction(SIGALRM, &act, NULL) == -1){
+        perror("sigaction");
+        exit(1);
+    }
+
     // Wait (no alarm, no limit) for a valid SET frame: A=0x03, C=0x03
     maquinadeestados(0x03, 0x03, FALSE);
 
@@ -306,7 +337,11 @@ int llSend(const unsigned char *buf, int bufSize)
     for (int attempt = 0; attempt <= ll.nRetransmissions; attempt++)
     {
         if (attempt > 0)
+        {
+            statRetrans++;
             printf("Retransmitting I frame Ns=%d (%d/%d)\n", module_counter, attempt, ll.nRetransmissions);
+        }
+        else statISent++;
 
         if (writeBytesSerialPort(frame, frame_size) != frame_size)
         {
@@ -323,7 +358,11 @@ int llSend(const unsigned char *buf, int bufSize)
         {
             // returns 1 if the alarm fired (time-out), 0 if an RR/REJ arrived
             if (maquinadeestados(0x03, C_ANY_REPLY, TRUE) == 1)
+            {
+                statTimeouts++;
+                printf("Time-out waiting for RR/REJ\n");
                 break;
+            }
 
             if (lastC == C_RR(next))
             {
@@ -338,6 +377,7 @@ int llSend(const unsigned char *buf, int bufSize)
             {
                 // negative ACK: the Rx saw errors in the data, send it again
                 printf("REJ%d received\n", module_counter);
+                statREJRcv++;
                 rejected = TRUE;
             }
             // anything else (e.g. a late, old RR): ignore it and keep waiting
@@ -364,20 +404,28 @@ static int sendSupervisionFrame(unsigned char a, unsigned char c)
 ////////////////////////////////////////////////
 
 //maquinadeestadosI
-// Same idea as maquinadeestados, but for I frames: F A C BCC1 D1...DN BCC2 F
-// It waits (forever) for one complete I frame with a correct header (BCC1).
+// Same idea as maquinadeestados, but for frames sent BY THE TRANSMITTER (A=0x03):
+//   I frames:   F A C BCC1 D1...DN BCC2 F   (C = 0x00 / 0x80)
+//   SET / DISC: F A C BCC1 F                (C = 0x03 / 0x0B, no data)
+// It waits (forever) for one complete frame with a correct header (BCC1).
 // Out: data[] = the data field already de-stuffed, WITH the BCC2 as its last byte
-//      *size  = how many bytes are in data[] (BCC2 included)
-//      *ns    = N(s) of the frame (0 or 1)
+//      *size  = how many bytes are in data[] (BCC2 included; 0 for SET / DISC)
+//      *ns    = N(s) of the frame (0 or 1), only meaningful for I frames
+//      *type  = T_I, T_SET or T_DISC
 // Frames with a wrong header are ignored, as the spec says.
+#define T_I 0
+#define T_SET 1
+#define T_DISC 2
 typedef enum { I_START, I_FLAG_RCV, I_A_RCV, I_C_RCV, I_DATA, I_STOP } IState;
 
-static void maquinadeestadosI(unsigned char *data, int *size, int *ns)
+static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type)
 {
     IState state = I_START;
     unsigned char c = 0;
     int escaped = FALSE; // TRUE right after a 0x7D (next byte must be de-stuffed)
     *size = 0;
+    *ns = 0;
+    *type = T_I;
 
     while (state != I_STOP)
     {
@@ -395,7 +443,7 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns)
             else if (byte != 0x7E) state = I_START; //another FLAG: stay here
             break;
         case I_A_RCV:
-            if (byte == 0x00 || byte == 0x80){ c = byte; state = I_C_RCV; } //C of an I frame
+            if (byte == 0x00 || byte == 0x80 || byte == 0x03 || byte == 0x0B){ c = byte; state = I_C_RCV; } //I, SET, DISC
             else if (byte == 0x7E) state = I_FLAG_RCV;
             else state = I_START;
             break;
@@ -404,6 +452,7 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns)
             {
                 //header is correct: from now on, everything until the next flag is data
                 *ns = (c == 0x80);
+                *type = (c == 0x03) ? T_SET : (c == 0x0B) ? T_DISC : T_I;
                 *size = 0;
                 escaped = FALSE;
                 state = I_DATA;
@@ -439,16 +488,36 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns)
     }
 }
 
+////////////////////////////////////////////////
+// LLRECEIVE
+////////////////////////////////////////////////
+
+static int discReceived = FALSE; //a DISC arrived while llReceive was waiting for data
+
 int llReceive(unsigned char *packet)
 {
     unsigned char data[MAX_PAYLOAD_SIZE + 1]; // data + BCC2
-    int size, ns;
+    int size, ns, type;
 
     while (TRUE)
     {
-        maquinadeestadosI(data, &size, &ns);
+        maquinadeestadosI(data, &size, &ns, &type);
 
-        if (size < 1) continue; // no room even for the BCC2: not a real I frame
+        if (type == T_SET && size == 0)
+        {
+            //our UA got lost: the Tx did not notice the connection is open and sent SET again
+            printf("SET received again. Sending UA again\n");
+            if (sendSupervisionFrame(0x03, 0x07) < 0) return -1;
+            continue;
+        }
+        if (type == T_DISC && size == 0)
+        {
+            //the Tx is closing the link although we did not get the END packet: tell the app
+            printf("DISC received while waiting for data\n");
+            discReceived = TRUE;
+            return -1;
+        }
+        if (type != T_I || size < 1) continue; // not a real I frame (no room even for the BCC2)
 
         //BCC2 is the last byte; the data is everything before it
         int dataLen = size - 1;
@@ -460,6 +529,7 @@ int llReceive(unsigned char *packet)
         {
             //duplicate (we already have it, our RR got lost): throw the data away, but confirm again
             printf("Duplicate I frame Ns=%d. Sending RR%d again\n", ns, module_counter);
+            statDup++;
             if (sendSupervisionFrame(0x03, C_RR(module_counter)) < 0) return -1;
             continue;
         }
@@ -468,6 +538,7 @@ int llReceive(unsigned char *packet)
         {
             //right frame but corrupted data: ask for it again
             printf("I frame Ns=%d with errors in the data. Sending REJ%d\n", ns, ns);
+            statREJSent++;
             if (sendSupervisionFrame(0x03, C_REJ(ns)) < 0) return -1;
             continue;
         }
@@ -475,6 +546,7 @@ int llReceive(unsigned char *packet)
         //new frame, data OK: hand it to the application and confirm
         memcpy(packet, data, dataLen);
         module_counter = 1 - ns; //now we expect the other number
+        statIRcv++;
         printf("I frame Ns=%d accepted (%d bytes). Sending RR%d\n", ns, dataLen, module_counter);
         if (sendSupervisionFrame(0x03, C_RR(module_counter)) < 0) return -1;
         return dataLen;
@@ -484,12 +556,50 @@ int llReceive(unsigned char *packet)
 ////////////////////////////////////////////////
 // LLCLOSE
 ////////////////////////////////////////////////
+//  Tx                      Rx
+//  DISC (A=0x03) ------->            command sent by the Tx
+//        <------- DISC (A=0x01)      command sent by the Rx
+//  UA   (A=0x01) ------->            reply sent by the Tx
 int llCloseTx()
 {
-    // TODO: DISC / UA exchange. For now it only closes the serial port.
+    int closed = FALSE;
+    alarmCount = 0;
+    alarmEnabled = FALSE;
+
+    // 1 first transmission + up to nRetransmissions retransmissions (DISC is protected by the timer)
+    for (int attempt = 0; attempt <= ll.nRetransmissions && !closed; attempt++)
+    {
+        if (attempt > 0) printf("Retransmitting DISC (%d/%d)\n", attempt, ll.nRetransmissions);
+
+        if (sendSupervisionFrame(0x03, 0x0B) < 0)
+        {
+            perror("writeBytesSerialPort");
+            break;
+        }
+        printf("DISC sent\n");
+
+        alarmEnabled = TRUE;
+        alarm(ll.timeout);
+        int r = maquinadeestados(0x01, 0x0B, TRUE); // DISC from the Rx: A=0x01
+        alarm(0);
+        alarmEnabled = FALSE;
+
+        if (r == 0) closed = TRUE;
+        else { statTimeouts++; printf("Time-out waiting for DISC\n"); }
+    }
+
+    if (closed)
+    {
+        // final UA: a reply sent by the Tx, so A = 0x01
+        if (sendSupervisionFrame(0x01, 0x07) < 0) perror("writeBytesSerialPort");
+        else printf("DISC received. UA sent. Connection closed\n");
+    }
+    else printf("No DISC received from the Rx. Closing anyway\n");
+
+    printStatistics(TRUE);
+
     // Wait until all bytes have been written to the serial port
     sleep(1);
-
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
@@ -497,15 +607,63 @@ int llCloseTx()
     }
     printf("Serial port %s closed\n", ll.serialPort);
 
-    return 0;
+    return closed ? 0 : -1;
 }
 
 int llCloseRx()
 {
-    // TODO: DISC / UA exchange. For now it only closes the serial port.
-    // Wait until all bytes have been written to the serial port
-    sleep(1);
+    unsigned char data[MAX_PAYLOAD_SIZE + 1];
+    int size, ns, type;
 
+    // 1) wait for the Tx DISC (unless llReceive already got it)
+    while (discReceived == FALSE)
+    {
+        maquinadeestadosI(data, &size, &ns, &type);
+
+        if (type == T_DISC && size == 0) break;
+
+        if (type == T_I && size >= 1 && ns != module_counter)
+        {
+            //the Tx did not get our last RR and sent the last I frame again: confirm it again
+            printf("Duplicate I frame Ns=%d while closing. Sending RR%d again\n", ns, module_counter);
+            statDup++;
+            sendSupervisionFrame(0x03, C_RR(module_counter));
+        }
+    }
+    printf("DISC received\n");
+
+    // 2) send our DISC (command sent by the Rx: A=0x01) and wait for the Tx UA (A=0x01)
+    int closed = FALSE;
+    alarmCount = 0;
+    alarmEnabled = FALSE;
+
+    for (int attempt = 0; attempt <= ll.nRetransmissions && !closed; attempt++)
+    {
+        if (attempt > 0) printf("Retransmitting DISC (%d/%d)\n", attempt, ll.nRetransmissions);
+
+        if (sendSupervisionFrame(0x01, 0x0B) < 0)
+        {
+            perror("writeBytesSerialPort");
+            break;
+        }
+        printf("DISC sent\n");
+
+        alarmEnabled = TRUE;
+        alarm(ll.timeout);
+        int r = maquinadeestados(0x01, 0x07, TRUE); // UA from the Tx: A=0x01
+        alarm(0);
+        alarmEnabled = FALSE;
+
+        if (r == 0) closed = TRUE;
+        else { statTimeouts++; printf("Time-out waiting for UA\n"); }
+    }
+
+    if (closed) printf("UA received. Connection closed\n");
+    else printf("No UA received from the Tx. Closing anyway\n");
+
+    printStatistics(FALSE);
+
+    sleep(1);
     if (closeSerialPort() < 0)
     {
         perror("closeSerialPort");
@@ -513,5 +671,5 @@ int llCloseRx()
     }
     printf("Serial port %s closed\n", ll.serialPort);
 
-    return 0;
+    return closed ? 0 : -1;
 }
