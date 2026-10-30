@@ -1,6 +1,4 @@
-// RCOM 2026/2027
-//
-// Implementação do protocolo da camada de aplicação
+
 
 #include "application_layer.h"
 #include "link_layer.h"
@@ -8,14 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-// campo de controlo (C) dos pacotes
+
 #define C_START 1
 #define C_DATA 2
 #define C_END 3
-// tipos (T) dos parâmetros TLV dos pacotes de controlo
+
 #define TLV_FILE_SIZE 0
 #define TLV_FILE_NAME 1
-// pacote DATA: C, L2, L1 e depois K bytes do ficheiro (K = 256*L2 + L1)
+
 #define DATA_HEADER 3
 static int ConstruirPacket(unsigned char *packet, unsigned char c, long fileSize, const char *fileName)
 {
@@ -40,11 +38,10 @@ static int ConstruirPacket(unsigned char *packet, unsigned char c, long fileSize
     return n;
 }
 
-// Lê os parâmetros TLV de um pacote de controlo. fileName precisa de 256 bytes.
-// Devolve 0 em sucesso, -1 se o pacote for inválido ou não tiver tamanho.
+
 static int ControlPacketPArse(const unsigned char *packet, int len, long *fileSize, char *fileName)
 {
-    int i = 1; // packet[0] é o C
+    int i = 1; 
     int gotSize = FALSE;
     fileName[0] = '\0';
 
@@ -68,13 +65,13 @@ static int ControlPacketPArse(const unsigned char *packet, int len, long *fileSi
             memcpy(fileName, packet + i, l);
             fileName[l] = '\0';
         }
-        // outros tipos: ignorados
+   
         i += l;
     }
     return gotSize ? 0 : -1;
 }
 
-// Pacote START -> pacotes DATA -> pacote END. A ligação já tem de estar aberta.
+
 static int mandarFile(const char *filename)
 {
     FILE *file = fopen(filename, "rb");
@@ -87,7 +84,7 @@ static int mandarFile(const char *filename)
     long fileSize = ftell(file);
     rewind(file);
 
-    // só o nome vai no pacote, sem as diretorias
+   
     const char *baseName = strrchr(filename, '/');
     baseName = (baseName == NULL) ? filename : baseName + 1;
     unsigned char packet[MAX_PAYLOAD_SIZE];
@@ -102,12 +99,12 @@ static int mandarFile(const char *filename)
 
     long sent = 0;
     size_t n;
-    // lê o próximo bloco do ficheiro logo a seguir aos 3 bytes de cabeçalho
+    
     while ((n = fread(packet + DATA_HEADER, 1, MAX_PAYLOAD_SIZE - DATA_HEADER, file)) > 0)
     {
         packet[0] = C_DATA;
-        packet[1] = (n >> 8) & 0xFF; // L2
-        packet[2] = n & 0xFF;        // L1
+        packet[1] = (n >> 8) & 0xFF; 
+        packet[2] = n & 0xFF;       
         if (llSend(packet, n + DATA_HEADER) < 0)
         {
             printf("Could not send a DATA packet (%ld of %ld bytes sent)\n", sent, fileSize);
@@ -135,7 +132,7 @@ static int mandarFile(const char *filename)
     return 0;
 }
 
-// Lê pacotes até ao END, escrevendo os dados em "filename". A ligação já tem de estar aberta.
+
 static int receberFile(const char *filename)
 {
     FILE *file = NULL;
@@ -172,7 +169,7 @@ static int receberFile(const char *filename)
         }
         else if (packet[0] == C_DATA)
         {
-            // o pacote DATA tem o seu próprio campo de tamanho: usa-se para validar o pacote
+        
             int k = 256 * packet[1] + packet[2];
             if (file == NULL || len < DATA_HEADER || k != len - DATA_HEADER)
             {
@@ -200,7 +197,7 @@ static int receberFile(const char *filename)
             }
             fclose(file);
 
-            // o END repete a informação do START e o ficheiro tem de ter o tamanho anunciado
+           
             if (endSize != expectedSize || received != expectedSize)
             {
                 printf("Size mismatch: START said %ld, END said %ld, received %ld bytes\n",
@@ -239,7 +236,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
 
         int result = mandarFile(filename);
 
-        // a ligação é fechada mesmo que a transferência tenha falhado
+        
         if (llCloseTx() < 0) printf("llCloseTx failed\n");
         printf(result == 0 ? "Transfer finished successfully\n" : "Transfer FAILED\n");
     }

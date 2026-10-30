@@ -50,7 +50,7 @@ int maquinadeestados(unsigned char expectedA, unsigned char expectedC, int useAl
             break;
         case ST_FLAG_RCV:
             if (byte == expectedA){ a = byte; state = ST_A_RCV; }
-            else if (byte != 0x7E) state = ST_START; //another FLAG: stay here
+            else if (byte != 0x7E) state = ST_START; 
             break;
         case ST_A_RCV:
             if (Cesperado(byte, expectedC)){ c = byte; lastC = byte; state = ST_C_RCV; }
@@ -127,7 +127,7 @@ while (alarmCount <= llParameters.nRetransmissions)
         {
             bytes = writeBytesSerialPort(buf, BUF_SIZE);
             printf("%d bytes written to serial port\n", bytes);
-            //escreve uma vez a cada alarme
+            
 
             alarm(llParameters.timeout); 
             alarmEnabled = TRUE;
@@ -144,7 +144,7 @@ while (alarmCount <= llParameters.nRetransmissions)
 }
 
 
-// espera que esteja tudo escrito
+
 sleep(1);
 
 
@@ -172,7 +172,7 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // Rx usa alarme no DISC
+   
     struct sigaction act = {0};
     act.sa_handler = &alarmHandler;
     if (sigaction(SIGALRM, &act, NULL) == -1){
@@ -211,8 +211,7 @@ int llSend(const unsigned char *buf, int bufSize)
     unsigned char bcc2=0x00;
     for (int i=0; i<bufSize; i++){
         bcc2^=buf[i];
-    }//calcula bcc2
-  
+    }
     frame[0]=0x7E;
     frame[1]=0x03;
     if (module_counter==0){frame[2]=0x00;}else frame[2]=0x80;
@@ -257,14 +256,14 @@ int llSend(const unsigned char *buf, int bufSize)
         frame[frame_size]= bcc2;
         frame_size++;
     }
-    //flag final
+   
     frame[frame_size]= 0x7E;
     frame_size++;
 
-    // stop and wait
-    int next = 1 - module_counter; // the N(r) the Rx answers with
+    
+    int next = 1 - module_counter; 
 
-    // 1 first transmission + up to nRetransmissions retransmissions
+  
     for (int attempt = 0; attempt <= ll.nRetransmissions; attempt++)
     {
         if (attempt > 0)
@@ -287,7 +286,7 @@ int llSend(const unsigned char *buf, int bufSize)
         int rejected = FALSE;
         while (alarmEnabled == TRUE && rejected == FALSE)
         {
-            // returns 1 if the alarm fired (time-out), 0 if an RR/REJ arrived
+          
             if (maquinadeestados(0x03, C_ANY_REPLY, TRUE) == 1)
             {
                 
@@ -297,7 +296,7 @@ int llSend(const unsigned char *buf, int bufSize)
 
             if (lastC == C_RR(next))
             {
-                // positive ACK: the Rx accepted the frame and now expects "next"
+           
                 alarm(0);
                 alarmEnabled = FALSE;
                 module_counter = next;
@@ -306,17 +305,17 @@ int llSend(const unsigned char *buf, int bufSize)
             }
             if (lastC == C_REJ(module_counter))
             {
-                // negative ACK: the Rx saw errors in the data, send it again
+               
                 printf("REJ%d received\n", module_counter);
                 
                 rejected = TRUE;
             }
-            // anything else (e.g. a late, old RR): ignore it and keep waiting
+         
         }
 
         alarm(0);
         alarmEnabled = FALSE;
-        // time-out or REJ: next iteration of the for loop retransmits
+   
     }
 
     printf("No valid answer after %d retransmissions. Giving up\n", ll.nRetransmissions);
@@ -361,7 +360,7 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
             else if (byte != 0x7E) state = I_START; 
             break;
         case I_A_RCV:
-            if (byte == 0x00 || byte == 0x80 || byte == 0x03 || byte == 0x0B){ c = byte; state = I_C_RCV; } //I, SET, DISC
+            if (byte == 0x00 || byte == 0x80 || byte == 0x03 || byte == 0x0B){ c = byte; state = I_C_RCV; }
             else if (byte == 0x7E) state = I_FLAG_RCV;
             else state = I_START;
             break;
@@ -385,7 +384,7 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
             {
                 escaped = FALSE;
                 if (byte == 0x7E){ state = I_FLAG_RCV; break; } 
-                byte ^= 0x20; //de-stuffing: 0x5E -> 0x7E, 0x5D -> 0x7D
+                byte ^= 0x20; 
                 store = TRUE;
             }
             else if (byte == 0x7D) escaped = TRUE;       
@@ -394,7 +393,7 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
 
             if (store)
             {
-                if (*size >= MAX_PAYLOAD_SIZE + 1) state = I_START; //too big
+                if (*size >= MAX_PAYLOAD_SIZE + 1) state = I_START;
                 else data[(*size)++] = byte;
             }
             break;
@@ -464,17 +463,14 @@ int llReceive(unsigned char *packet)
 }
 
 
-//  Tx                      Rx
-//  DISC (A=0x03) ------->            command sent by the Tx
-//        <------- DISC (A=0x01)      command sent by the Rx
-//  UA   (A=0x01) ------->            reply sent by the Tx
+
 int llCloseTx()
 {
     int closed = FALSE;
     alarmCount = 0;
     alarmEnabled = FALSE;
 
-    // 1 first transmission + up to nRetransmissions retransmissions (DISC is protected by the timer)
+  
     for (int attempt = 0; attempt <= ll.nRetransmissions && !closed; attempt++)
     {
         if (attempt > 0) printf("Retransmitting DISC (%d/%d)\n", attempt, ll.nRetransmissions);
