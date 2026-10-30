@@ -1,6 +1,6 @@
 // RCOM 2026/2027
 //
-// Application layer protocol implementation
+// Implementação do protocolo da camada de aplicação
 
 #include "application_layer.h"
 #include "link_layer.h"
@@ -10,14 +10,14 @@
 #include <string.h>
 #include <time.h>
 
-// Control field (C) of the packets
+// campo de controlo (C) dos pacotes
 #define C_START 1
 #define C_DATA 2
 #define C_END 3
-// Types (T) of the TLV parameters of the control packets
+// tipos (T) dos parâmetros TLV dos pacotes de controlo
 #define TLV_FILE_SIZE 0
 #define TLV_FILE_NAME 1
-// A DATA packet is: C, L2, L1, then K bytes of the file (K = 256*L2 + L1)
+// pacote DATA: C, L2, L1 e depois K bytes do ficheiro (K = 256*L2 + L1)
 #define DATA_HEADER 3
 
 static double secondsSince(const struct timespec *start)
@@ -27,8 +27,7 @@ static double secondsSince(const struct timespec *start)
     return (now.tv_sec - start->tv_sec) + (now.tv_nsec - start->tv_nsec) / 1e9;
 }
 
-// Prints how fast the file went through the link. S = R/C is the "efficiency" used in the report
-// (R = received bit rate, C = link capacity = baud rate).
+// S = R/C: eficiência usada no relatório (R = débito recebido, C = capacidade da ligação = baud rate)
 static void printThroughput(long fileSize, double seconds, int baudRate)
 {
     if (seconds <= 0) return;
@@ -37,9 +36,9 @@ static void printThroughput(long fileSize, double seconds, int baudRate)
            fileSize, seconds, R, baudRate, R / baudRate);
 }
 
-// Builds a control packet: C | T=0 L size | T=1 L name
-// The size is written with as few bytes as needed, most significant first.
-// Returns the number of bytes of the packet.
+// Constrói um pacote de controlo: C | T=0 L tamanho | T=1 L nome
+// O tamanho usa o mínimo de bytes necessários, do mais significativo para o menos.
+// Devolve o número de bytes do pacote.
 static int buildControlPacket(unsigned char *packet, unsigned char c, long fileSize, const char *fileName)
 {
     int n = 0;
@@ -63,11 +62,11 @@ static int buildControlPacket(unsigned char *packet, unsigned char c, long fileS
     return n;
 }
 
-// Reads the TLV parameters of a control packet. fileName must have room for 256 bytes.
-// Returns 0 on success, -1 if the packet is malformed or has no file size.
+// Lê os parâmetros TLV de um pacote de controlo. fileName precisa de 256 bytes.
+// Devolve 0 em sucesso, -1 se o pacote for inválido ou não tiver tamanho.
 static int parseControlPacket(const unsigned char *packet, int len, long *fileSize, char *fileName)
 {
-    int i = 1; // packet[0] is C
+    int i = 1; // packet[0] é o C
     int gotSize = FALSE;
     fileName[0] = '\0';
 
@@ -76,7 +75,7 @@ static int parseControlPacket(const unsigned char *packet, int len, long *fileSi
         unsigned char t = packet[i];
         unsigned char l = packet[i + 1];
         i += 2;
-        if (i + l > len) return -1; // value goes past the end of the packet
+        if (i + l > len) return -1;
 
         if (t == TLV_FILE_SIZE)
         {
@@ -91,13 +90,13 @@ static int parseControlPacket(const unsigned char *packet, int len, long *fileSi
             memcpy(fileName, packet + i, l);
             fileName[l] = '\0';
         }
-        // other types: skipped
+        // outros tipos: ignorados
         i += l;
     }
     return gotSize ? 0 : -1;
 }
 
-// START packet -> DATA packets -> END packet. The link must already be open.
+// Pacote START -> pacotes DATA -> pacote END. A ligação já tem de estar aberta.
 static int sendFile(const char *filename, int baudRate)
 {
     FILE *file = fopen(filename, "rb");
@@ -110,7 +109,7 @@ static int sendFile(const char *filename, int baudRate)
     long fileSize = ftell(file);
     rewind(file);
 
-    // only the name goes in the packet, not the directories
+    // só o nome vai no pacote, sem as diretorias
     const char *baseName = strrchr(filename, '/');
     baseName = (baseName == NULL) ? filename : baseName + 1;
 
@@ -129,7 +128,7 @@ static int sendFile(const char *filename, int baudRate)
 
     long sent = 0;
     size_t n;
-    // read the next piece of the file straight after the 3 header bytes
+    // lê o próximo bloco do ficheiro logo a seguir aos 3 bytes de cabeçalho
     while ((n = fread(packet + DATA_HEADER, 1, MAX_PAYLOAD_SIZE - DATA_HEADER, file)) > 0)
     {
         packet[0] = C_DATA;
@@ -163,7 +162,7 @@ static int sendFile(const char *filename, int baudRate)
     return 0;
 }
 
-// Reads packets until the END packet, writing the data to "filename". The link must already be open.
+// Lê pacotes até ao END, escrevendo os dados em "filename". A ligação já tem de estar aberta.
 static int receiveFile(const char *filename, int baudRate)
 {
     FILE *file = NULL;
@@ -202,7 +201,7 @@ static int receiveFile(const char *filename, int baudRate)
         }
         else if (packet[0] == C_DATA)
         {
-            // the DATA packet has its own length field: use it to double-check the packet
+            // o pacote DATA tem o seu próprio campo de tamanho: usa-se para validar o pacote
             int k = 256 * packet[1] + packet[2];
             if (file == NULL || len < DATA_HEADER || k != len - DATA_HEADER)
             {
@@ -230,7 +229,7 @@ static int receiveFile(const char *filename, int baudRate)
             }
             fclose(file);
 
-            // END repeats the START information, and the file must have the announced size
+            // o END repete a informação do START e o ficheiro tem de ter o tamanho anunciado
             if (endSize != expectedSize || received != expectedSize)
             {
                 printf("Size mismatch: START said %ld, END said %ld, received %ld bytes\n",
@@ -270,7 +269,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
 
         int result = sendFile(filename, baudRate);
 
-        // the link is closed even if the transfer failed
+        // a ligação é fechada mesmo que a transferência tenha falhado
         if (llCloseTx() < 0) printf("llCloseTx failed\n");
         printf(result == 0 ? "Transfer finished successfully\n" : "Transfer FAILED\n");
     }
