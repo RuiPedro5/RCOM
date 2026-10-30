@@ -4,11 +4,9 @@
 
 #include "application_layer.h"
 #include "link_layer.h"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 // campo de controlo (C) dos pacotes
 #define C_START 1
@@ -19,27 +17,7 @@
 #define TLV_FILE_NAME 1
 // pacote DATA: C, L2, L1 e depois K bytes do ficheiro (K = 256*L2 + L1)
 #define DATA_HEADER 3
-
-static double secondsSince(const struct timespec *start)
-{
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (now.tv_sec - start->tv_sec) + (now.tv_nsec - start->tv_nsec) / 1e9;
-}
-
-// S = R/C: eficiência usada no relatório (R = débito recebido, C = capacidade da ligação = baud rate)
-static void printThroughput(long fileSize, double seconds, int baudRate)
-{
-    if (seconds <= 0) return;
-    double R = fileSize * 8.0 / seconds;
-    printf("%ld bytes in %.2f s -> R = %.0f bit/s, C = %d bit/s, S = R/C = %.3f\n",
-           fileSize, seconds, R, baudRate, R / baudRate);
-}
-
-// Constrói um pacote de controlo: C | T=0 L tamanho | T=1 L nome
-// O tamanho usa o mínimo de bytes necessários, do mais significativo para o menos.
-// Devolve o número de bytes do pacote.
-static int buildControlPacket(unsigned char *packet, unsigned char c, long fileSize, const char *fileName)
+static int ConstruirPacket(unsigned char *packet, unsigned char c, long fileSize, const char *fileName)
 {
     int n = 0;
     packet[n++] = c;
@@ -64,7 +42,7 @@ static int buildControlPacket(unsigned char *packet, unsigned char c, long fileS
 
 // Lê os parâmetros TLV de um pacote de controlo. fileName precisa de 256 bytes.
 // Devolve 0 em sucesso, -1 se o pacote for inválido ou não tiver tamanho.
-static int parseControlPacket(const unsigned char *packet, int len, long *fileSize, char *fileName)
+static int ControlPacketPArse(const unsigned char *packet, int len, long *fileSize, char *fileName)
 {
     int i = 1; // packet[0] é o C
     int gotSize = FALSE;
@@ -97,7 +75,7 @@ static int parseControlPacket(const unsigned char *packet, int len, long *fileSi
 }
 
 // Pacote START -> pacotes DATA -> pacote END. A ligação já tem de estar aberta.
-static int sendFile(const char *filename, int baudRate)
+static int mandarFile(const char *filename)
 {
     FILE *file = fopen(filename, "rb");
     if (file == NULL)
@@ -112,13 +90,9 @@ static int sendFile(const char *filename, int baudRate)
     // só o nome vai no pacote, sem as diretorias
     const char *baseName = strrchr(filename, '/');
     baseName = (baseName == NULL) ? filename : baseName + 1;
-
-    struct timespec start;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
     unsigned char packet[MAX_PAYLOAD_SIZE];
 
-    int len = buildControlPacket(packet, C_START, fileSize, baseName);
+    int len = ConstruirPacket(packet, C_START, fileSize, baseName);
     if (llSend(packet, len) < 0)
     {
         printf("Could not send the START packet\n");
@@ -150,25 +124,23 @@ static int sendFile(const char *filename, int baudRate)
     }
     fclose(file);
 
-    len = buildControlPacket(packet, C_END, fileSize, baseName);
+    len = ConstruirPacket(packet, C_END, fileSize, baseName);
     if (llSend(packet, len) < 0)
     {
         printf("Could not send the END packet\n");
         return -1;
     }
 
-    printf("File \"%s\" sent. ", baseName);
-    printThroughput(fileSize, secondsSince(&start), baudRate);
+    printf("File \"%s\" sent. \n", baseName);
     return 0;
 }
 
 // Lê pacotes até ao END, escrevendo os dados em "filename". A ligação já tem de estar aberta.
-static int receiveFile(const char *filename, int baudRate)
+static int receberFile(const char *filename)
 {
     FILE *file = NULL;
     long expectedSize = 0, received = 0;
     char nameInPacket[256];
-    struct timespec start;
     unsigned char packet[MAX_PAYLOAD_SIZE];
 
     while (TRUE)
@@ -184,7 +156,7 @@ static int receiveFile(const char *filename, int baudRate)
 
         if (packet[0] == C_START)
         {
-            if (file != NULL || parseControlPacket(packet, len, &expectedSize, nameInPacket) < 0)
+            if (file != NULL || ControlPacketPArse(packet, len, &expectedSize, nameInPacket) < 0)
             {
                 printf("Invalid START packet\n");
                 if (file) fclose(file);
@@ -196,7 +168,6 @@ static int receiveFile(const char *filename, int baudRate)
                 perror("fopen");
                 return -1;
             }
-            clock_gettime(CLOCK_MONOTONIC, &start);
             printf("Receiving \"%s\" (%ld bytes) into \"%s\"\n", nameInPacket, expectedSize, filename);
         }
         else if (packet[0] == C_DATA)
@@ -221,7 +192,7 @@ static int receiveFile(const char *filename, int baudRate)
         {
             long endSize = 0;
             char endName[256];
-            if (file == NULL || parseControlPacket(packet, len, &endSize, endName) < 0)
+            if (file == NULL || ControlPacketPArse(packet, len, &endSize, endName) < 0)
             {
                 printf("Invalid END packet\n");
                 if (file) fclose(file);
@@ -236,8 +207,7 @@ static int receiveFile(const char *filename, int baudRate)
                        expectedSize, endSize, received);
                 return -1;
             }
-            printf("File \"%s\" received correctly. ", filename);
-            printThroughput(received, secondsSince(&start), baudRate);
+            printf("File \"%s\" received correctly. \n", filename);
             return 0;
         }
         else
@@ -267,7 +237,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             return;
         }
 
-        int result = sendFile(filename, baudRate);
+        int result = mandarFile(filename);
 
         // a ligação é fechada mesmo que a transferência tenha falhado
         if (llCloseTx() < 0) printf("llCloseTx failed\n");
@@ -281,7 +251,7 @@ void applicationLayer(const char *serialPort, const char *role, int baudRate,
             return;
         }
 
-        int result = receiveFile(filename, baudRate);
+        int result = receberFile(filename);
 
         if (llCloseRx() < 0) printf("llCloseRx failed\n");
         printf(result == 0 ? "Transfer finished successfully\n" : "Transfer FAILED\n");

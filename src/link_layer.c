@@ -1,6 +1,3 @@
-// RCOM 2026/2027
-//
-// Implementação do protocolo de ligação de dados
 
 #include "link_layer.h"
 #include "serial_port.h"
@@ -11,54 +8,27 @@
 #include <signal.h>
 #include <string.h>
 
-#define _POSIX_SOURCE 1
+
+#define _POSIX_SOURCE 1 
 #define BUF_SIZE 5
 int alarmEnabled = FALSE;
 int alarmCount= 0;
-
-// N(s): no Tx é o número da próxima trama I a enviar; no Rx é o número da próxima trama I esperada
 static int module_counter=0;
-
-// parâmetros guardados por llOpenTx/llOpenRx para o llSend os usar
 static LinkLayer ll;
-
-// campo C da última trama de supervisão aceite pela maquinadeestados
 static unsigned char lastC = 0;
 
-// estatísticas (mostradas ao fechar a ligação)
-static int statISent = 0;
-static int statRetrans = 0;
-static int statTimeouts = 0;
-static int statREJRcv = 0;
-static int statIRcv = 0;
-static int statDup = 0;
-static int statREJSent = 0;
-
-static void printStatistics(int isTx){
-    printf("---- Link layer statistics ----\n");
-    if (isTx)
-        printf("I frames sent: %d | retransmitted: %d | time-outs: %d | REJ received: %d\n",
-               statISent, statRetrans, statTimeouts, statREJRcv);
-    else
-        printf("I frames accepted: %d | duplicates: %d | REJ sent: %d | time-outs: %d\n",
-               statIRcv, statDup, statREJSent, statTimeouts);
-}
-
-// valor de expectedC que aceita RR0, RR1, REJ0 ou REJ1
 #define C_ANY_REPLY 0xFF
+
 #define C_RR(n)  (0xAA | (n))
 #define C_REJ(n) (0x54 | (n))
 
-static int isExpectedC(unsigned char byte, unsigned char expectedC){
+static int Cesperado(unsigned char byte, unsigned char expectedC){
     if (expectedC == C_ANY_REPLY)
         return byte == C_RR(0) || byte == C_RR(1) || byte == C_REJ(0) || byte == C_REJ(1);
     return byte == expectedC;
 }
 
-// Máquina de estados para tramas de supervisão: F A C BCC1 F
-// useAlarm == TRUE : pára quando o alarme dispara
-// useAlarm == FALSE: espera indefinidamente
-// Devolve 0 se a trama foi recebida, 1 se o alarme disparou primeiro.
+
 typedef enum { ST_START, ST_FLAG_RCV, ST_A_RCV, ST_C_RCV, ST_BCC_OK, ST_STOP } State;
 
 int maquinadeestados(unsigned char expectedA, unsigned char expectedC, int useAlarm){
@@ -67,19 +37,12 @@ int maquinadeestados(unsigned char expectedA, unsigned char expectedC, int useAl
     unsigned char a = 0, c = 0;
 
     while (state != ST_STOP){
+        
         if (useAlarm && alarmEnabled == FALSE) return 1;
 
         unsigned char byte;
         int nbytes = readByteSerialPort(&byte);
-
-#ifdef DEBUG_BYTES
-        printf ("saiu da funçao readByteSerialPort tendo ido %d bytes\n", nbytes);
-#endif
         if (nbytes<=0){continue;}
-
-#ifdef DEBUG_BYTES
-        printf("Byte received: 0x%02X\n", byte) ;
-#endif
 
         switch (state){
         case ST_START:
@@ -87,10 +50,10 @@ int maquinadeestados(unsigned char expectedA, unsigned char expectedC, int useAl
             break;
         case ST_FLAG_RCV:
             if (byte == expectedA){ a = byte; state = ST_A_RCV; }
-            else if (byte != 0x7E) state = ST_START;
+            else if (byte != 0x7E) state = ST_START; //another FLAG: stay here
             break;
         case ST_A_RCV:
-            if (isExpectedC(byte, expectedC)){ c = byte; lastC = byte; state = ST_C_RCV; }
+            if (Cesperado(byte, expectedC)){ c = byte; lastC = byte; state = ST_C_RCV; }
             else if (byte == 0x7E) state = ST_FLAG_RCV;
             else state = ST_START;
             break;
@@ -121,13 +84,11 @@ void alarmHandler(int signal)
 }
 
 
-////////////////////////////////////////////////
-// LLOPEN
-////////////////////////////////////////////////
+
+
 int llOpenTx(LinkLayer llParameters)
 {
 ll = llParameters;
-
 if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
 {
 perror("openSerialPort");
@@ -135,6 +96,7 @@ return -1;
 }
 
 printf("Serial port %s opened\n", llParameters.serialPort);
+
 
 unsigned char buf[BUF_SIZE] = {0};
 
@@ -165,15 +127,16 @@ while (alarmCount <= llParameters.nRetransmissions)
         {
             bytes = writeBytesSerialPort(buf, BUF_SIZE);
             printf("%d bytes written to serial port\n", bytes);
+            //escreve uma vez a cada alarme
 
-            alarm(llParameters.timeout);
+            alarm(llParameters.timeout); 
             alarmEnabled = TRUE;
             
         }  
     
     if (maquinadeestados(0x03, 0x07, TRUE)==0){
         alarm(0);
-        alarmEnabled = FALSE;
+        alarmEnabled = FALSE; 
         return 0; 
     }
     
@@ -181,7 +144,9 @@ while (alarmCount <= llParameters.nRetransmissions)
 }
 
 
+// espera que esteja tudo escrito
 sleep(1);
+
 
 if (closeSerialPort() < 0)
 {
@@ -198,7 +163,7 @@ return -1;
 int llOpenRx(LinkLayer llParameters)
 {
     ll = llParameters;
-
+ 
     if (openSerialPort(llParameters.serialPort, llParameters.baudRate) < 0)
     {
         perror("openSerialPort");
@@ -207,7 +172,7 @@ int llOpenRx(LinkLayer llParameters)
 
     printf("Serial port %s opened\n", llParameters.serialPort);
 
-    // o Rx também usa o alarme (o DISC enviado em llCloseRx é protegido por temporizador)
+    // Rx usa alarme no DISC
     struct sigaction act = {0};
     act.sa_handler = &alarmHandler;
     if (sigaction(SIGALRM, &act, NULL) == -1){
@@ -215,11 +180,11 @@ int llOpenRx(LinkLayer llParameters)
         exit(1);
     }
 
-    // espera, sem limite, por uma trama SET válida: A=0x03, C=0x03
     maquinadeestados(0x03, 0x03, FALSE);
 
     printf("Received SET. Will send UA.\n");
 
+   
     unsigned char buf[BUF_SIZE] = {0};
 
     buf[0] = 0X7E;
@@ -231,13 +196,10 @@ int llOpenRx(LinkLayer llParameters)
     int bytes = writeBytesSerialPort(buf, BUF_SIZE);
     printf("%d bytes written to serial port\n", bytes);
 
-    // a porta fica aberta: é fechada em llCloseRx()
+
     return 0;
 }
 
-////////////////////////////////////////////////
-// LLSEND
-////////////////////////////////////////////////
 
 int llSend(const unsigned char *buf, int bufSize)
 {
@@ -245,17 +207,19 @@ int llSend(const unsigned char *buf, int bufSize)
 
     int frame_size=0;
     unsigned char frame[2*MAX_PAYLOAD_SIZE + 7];
+    
     unsigned char bcc2=0x00;
     for (int i=0; i<bufSize; i++){
         bcc2^=buf[i];
-    }
+    }//calcula bcc2
+  
     frame[0]=0x7E;
     frame[1]=0x03;
     if (module_counter==0){frame[2]=0x00;}else frame[2]=0x80;
     frame[3]=frame[1]^frame[2];
     frame_size= 4;
 
-    // byte stuffing dos dados
+  
     for (int i=0; i<bufSize; i++){
         if (buf[i]==0x7E){
             frame[frame_size]=0x7D;
@@ -275,7 +239,7 @@ int llSend(const unsigned char *buf, int bufSize)
         }
     }
 
-    // BCC2 (também com stuffing)
+
     if(bcc2==0x7D){
         frame[frame_size]=0x7d;
         frame_size++;
@@ -293,20 +257,22 @@ int llSend(const unsigned char *buf, int bufSize)
         frame[frame_size]= bcc2;
         frame_size++;
     }
+    //flag final
     frame[frame_size]= 0x7E;
     frame_size++;
 
-    // Stop & Wait: envia a trama e espera a resposta do Rx (RR ou REJ)
-    int next = 1 - module_counter;
+    // stop and wait
+    int next = 1 - module_counter; // the N(r) the Rx answers with
 
+    // 1 first transmission + up to nRetransmissions retransmissions
     for (int attempt = 0; attempt <= ll.nRetransmissions; attempt++)
     {
         if (attempt > 0)
         {
-            statRetrans++;
+            
             printf("Retransmitting I frame Ns=%d (%d/%d)\n", module_counter, attempt, ll.nRetransmissions);
         }
-        else statISent++;
+        
 
         if (writeBytesSerialPort(frame, frame_size) != frame_size)
         {
@@ -321,16 +287,17 @@ int llSend(const unsigned char *buf, int bufSize)
         int rejected = FALSE;
         while (alarmEnabled == TRUE && rejected == FALSE)
         {
-            // devolve 1 se houve time-out, 0 se chegou RR/REJ
+            // returns 1 if the alarm fired (time-out), 0 if an RR/REJ arrived
             if (maquinadeestados(0x03, C_ANY_REPLY, TRUE) == 1)
             {
-                statTimeouts++;
+                
                 printf("Time-out waiting for RR/REJ\n");
                 break;
             }
 
             if (lastC == C_RR(next))
             {
+                // positive ACK: the Rx accepted the frame and now expects "next"
                 alarm(0);
                 alarmEnabled = FALSE;
                 module_counter = next;
@@ -339,40 +306,31 @@ int llSend(const unsigned char *buf, int bufSize)
             }
             if (lastC == C_REJ(module_counter))
             {
+                // negative ACK: the Rx saw errors in the data, send it again
                 printf("REJ%d received\n", module_counter);
-                statREJRcv++;
+                
                 rejected = TRUE;
             }
-            // qualquer outra resposta (ex.: RR antigo atrasado) é ignorada
+            // anything else (e.g. a late, old RR): ignore it and keep waiting
         }
 
         alarm(0);
         alarmEnabled = FALSE;
+        // time-out or REJ: next iteration of the for loop retransmits
     }
 
     printf("No valid answer after %d retransmissions. Giving up\n", ll.nRetransmissions);
     return -1;
 }
 
-static int sendSupervisionFrame(unsigned char a, unsigned char c)
+
+static int mandarframeS(unsigned char a, unsigned char c)
 {
     unsigned char f[5] = {0x7E, a, c, a ^ c, 0x7E};
     return writeBytesSerialPort(f, 5);
 }
 
-////////////////////////////////////////////////
-// LLRECEIVE
-////////////////////////////////////////////////
 
-// Máquina de estados para tramas enviadas pelo transmissor (A=0x03):
-//   trama I:    F A C BCC1 D1...DN BCC2 F   (C = 0x00 / 0x80)
-//   SET / DISC: F A C BCC1 F                (C = 0x03 / 0x0B)
-// Saídas:
-//   data[] = campo de dados já sem stuffing, com o BCC2 como último byte
-//   *size  = número de bytes em data[] (0 para SET / DISC)
-//   *ns    = N(s) da trama (só relevante para tramas I)
-//   *type  = T_I, T_SET ou T_DISC
-// Tramas com cabeçalho errado são ignoradas.
 #define T_I 0
 #define T_SET 1
 #define T_DISC 2
@@ -382,7 +340,7 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
 {
     IState state = I_START;
     unsigned char c = 0;
-    int escaped = FALSE;
+    int escaped = FALSE; 
     *size = 0;
     *ns = 0;
     *type = T_I;
@@ -400,16 +358,17 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
             break;
         case I_FLAG_RCV:
             if (byte == 0x03) state = I_A_RCV;
-            else if (byte != 0x7E) state = I_START;
+            else if (byte != 0x7E) state = I_START; 
             break;
         case I_A_RCV:
-            if (byte == 0x00 || byte == 0x80 || byte == 0x03 || byte == 0x0B){ c = byte; state = I_C_RCV; }
+            if (byte == 0x00 || byte == 0x80 || byte == 0x03 || byte == 0x0B){ c = byte; state = I_C_RCV; } //I, SET, DISC
             else if (byte == 0x7E) state = I_FLAG_RCV;
             else state = I_START;
             break;
         case I_C_RCV:
             if (byte == (0x03 ^ c))
             {
+                
                 *ns = (c == 0x80);
                 *type = (c == 0x03) ? T_SET : (c == 0x0B) ? T_DISC : T_I;
                 *size = 0;
@@ -425,17 +384,17 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
             if (escaped)
             {
                 escaped = FALSE;
-                if (byte == 0x7E){ state = I_FLAG_RCV; break; }
-                byte ^= 0x20; // 0x5E -> 0x7E, 0x5D -> 0x7D
+                if (byte == 0x7E){ state = I_FLAG_RCV; break; } 
+                byte ^= 0x20; //de-stuffing: 0x5E -> 0x7E, 0x5D -> 0x7D
                 store = TRUE;
             }
-            else if (byte == 0x7D) escaped = TRUE;
-            else if (byte == 0x7E) state = I_STOP;
+            else if (byte == 0x7D) escaped = TRUE;       
+            else if (byte == 0x7E) state = I_STOP;       
             else store = TRUE;
 
             if (store)
             {
-                if (*size >= MAX_PAYLOAD_SIZE + 1) state = I_START;
+                if (*size >= MAX_PAYLOAD_SIZE + 1) state = I_START; //too big
                 else data[(*size)++] = byte;
             }
             break;
@@ -447,16 +406,11 @@ static void maquinadeestadosI(unsigned char *data, int *size, int *ns, int *type
     }
 }
 
-////////////////////////////////////////////////
-// LLRECEIVE
-////////////////////////////////////////////////
-
-// TRUE se chegou um DISC enquanto o llReceive esperava dados
-static int discReceived = FALSE;
+static int discReceived = FALSE; 
 
 int llReceive(unsigned char *packet)
 {
-    unsigned char data[MAX_PAYLOAD_SIZE + 1];
+    unsigned char data[MAX_PAYLOAD_SIZE + 1]; 
     int size, ns, type;
 
     while (TRUE)
@@ -465,19 +419,19 @@ int llReceive(unsigned char *packet)
 
         if (type == T_SET && size == 0)
         {
-            // o UA perdeu-se: o Tx reenviou o SET
+           
             printf("SET received again. Sending UA again\n");
-            if (sendSupervisionFrame(0x03, 0x07) < 0) return -1;
+            if (mandarframeS(0x03, 0x07) < 0) return -1;
             continue;
         }
         if (type == T_DISC && size == 0)
         {
+            
             printf("DISC received while waiting for data\n");
             discReceived = TRUE;
             return -1;
         }
-        if (type != T_I || size < 1) continue;
-
+        if (type != T_I || size < 1) continue; 
         int dataLen = size - 1;
         unsigned char bcc2 = 0x00;
         for (int i = 0; i < dataLen; i++) bcc2 ^= data[i];
@@ -485,49 +439,47 @@ int llReceive(unsigned char *packet)
 
         if (ns != module_counter)
         {
-            // duplicado (o RR perdeu-se): descarta os dados mas volta a confirmar
             printf("Duplicate I frame Ns=%d. Sending RR%d again\n", ns, module_counter);
-            statDup++;
-            if (sendSupervisionFrame(0x03, C_RR(module_counter)) < 0) return -1;
+           
+            if (mandarframeS(0x03, C_RR(module_counter)) < 0) return -1;
             continue;
         }
 
         if (!bcc2Ok)
         {
-            // trama esperada mas com dados corrompidos: pede reenvio
             printf("I frame Ns=%d with errors in the data. Sending REJ%d\n", ns, ns);
-            statREJSent++;
-            if (sendSupervisionFrame(0x03, C_REJ(ns)) < 0) return -1;
+            
+            if (mandarframeS(0x03, C_REJ(ns)) < 0) return -1;
             continue;
         }
 
+     
         memcpy(packet, data, dataLen);
-        module_counter = 1 - ns;
-        statIRcv++;
+        module_counter = 1 - ns; 
+        
         printf("I frame Ns=%d accepted (%d bytes). Sending RR%d\n", ns, dataLen, module_counter);
-        if (sendSupervisionFrame(0x03, C_RR(module_counter)) < 0) return -1;
+        if (mandarframeS(0x03, C_RR(module_counter)) < 0) return -1;
         return dataLen;
     }
 }
 
-////////////////////////////////////////////////
-// LLCLOSE
-////////////////////////////////////////////////
+
 //  Tx                      Rx
-//  DISC (A=0x03) ------->            comando enviado pelo Tx
-//        <------- DISC (A=0x01)      comando enviado pelo Rx
-//  UA   (A=0x01) ------->            resposta enviada pelo Tx
+//  DISC (A=0x03) ------->            command sent by the Tx
+//        <------- DISC (A=0x01)      command sent by the Rx
+//  UA   (A=0x01) ------->            reply sent by the Tx
 int llCloseTx()
 {
     int closed = FALSE;
     alarmCount = 0;
     alarmEnabled = FALSE;
 
+    // 1 first transmission + up to nRetransmissions retransmissions (DISC is protected by the timer)
     for (int attempt = 0; attempt <= ll.nRetransmissions && !closed; attempt++)
     {
         if (attempt > 0) printf("Retransmitting DISC (%d/%d)\n", attempt, ll.nRetransmissions);
 
-        if (sendSupervisionFrame(0x03, 0x0B) < 0)
+        if (mandarframeS(0x03, 0x0B) < 0)
         {
             perror("writeBytesSerialPort");
             break;
@@ -541,17 +493,15 @@ int llCloseTx()
         alarmEnabled = FALSE;
 
         if (r == 0) closed = TRUE;
-        else { statTimeouts++; printf("Time-out waiting for DISC\n"); }
+        else {printf("Time-out waiting for DISC\n"); }
     }
 
     if (closed)
     {
-        if (sendSupervisionFrame(0x01, 0x07) < 0) perror("writeBytesSerialPort");
+        if (mandarframeS(0x01, 0x07) < 0) perror("writeBytesSerialPort");
         else printf("DISC received. UA sent. Connection closed\n");
     }
     else printf("No DISC received from the Rx. Closing anyway\n");
-
-    printStatistics(TRUE);
 
     sleep(1);
     if (closeSerialPort() < 0)
@@ -569,7 +519,6 @@ int llCloseRx()
     unsigned char data[MAX_PAYLOAD_SIZE + 1];
     int size, ns, type;
 
-    // 1) espera o DISC do Tx (a não ser que o llReceive já o tenha recebido)
     while (discReceived == FALSE)
     {
         maquinadeestadosI(data, &size, &ns, &type);
@@ -578,15 +527,15 @@ int llCloseRx()
 
         if (type == T_I && size >= 1 && ns != module_counter)
         {
-            // o Tx não recebeu o último RR e reenviou a última trama I
+            
             printf("Duplicate I frame Ns=%d while closing. Sending RR%d again\n", ns, module_counter);
-            statDup++;
-            sendSupervisionFrame(0x03, C_RR(module_counter));
+            
+            mandarframeS(0x03, C_RR(module_counter));
         }
     }
     printf("DISC received\n");
 
-    // 2) envia o DISC do Rx (A=0x01) e espera o UA do Tx (A=0x01)
+    
     int closed = FALSE;
     alarmCount = 0;
     alarmEnabled = FALSE;
@@ -595,7 +544,7 @@ int llCloseRx()
     {
         if (attempt > 0) printf("Retransmitting DISC (%d/%d)\n", attempt, ll.nRetransmissions);
 
-        if (sendSupervisionFrame(0x01, 0x0B) < 0)
+        if (mandarframeS(0x01, 0x0B) < 0)
         {
             perror("writeBytesSerialPort");
             break;
@@ -609,14 +558,11 @@ int llCloseRx()
         alarmEnabled = FALSE;
 
         if (r == 0) closed = TRUE;
-        else { statTimeouts++; printf("Time-out waiting for UA\n"); }
+        else {printf("Time-out waiting for UA\n"); }
     }
 
     if (closed) printf("UA received. Connection closed\n");
     else printf("No UA received from the Tx. Closing anyway\n");
-
-    printStatistics(FALSE);
-
     sleep(1);
     if (closeSerialPort() < 0)
     {
